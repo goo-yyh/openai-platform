@@ -42,7 +42,7 @@ def main():
             return
         # Config is a read-only bind mount; recreate so edits are picked up with admin disabled.
         compose(env, "up", "-d", "--force-recreate", "--wait", "--wait-timeout", "40")
-        with request(env, "/healthz", token=False, timeout=5) as r:
+        with request(env, "/healthz", token=False, timeout=5, origin=BASE_URL) as r:
             if r.status != 200:
                 raise RuntimeError("Gateway health check failed")
         print("Gateway ready: " + BASE_URL + "/v1 (loopback only)")

@@ -10,14 +10,21 @@ import shutil
 import subprocess
 import sys
 
-from common import ROOT, codex_config, codex_env, credentials, load_env, redact, save_json
+from common import BASE_URL, ROOT, codex_config, codex_env, credentials, gateway_url, load_env, redact, save_json
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--remote", action="store_true", help="Verify local Codex through the managed SSH tunnel")
+    transport = parser.add_mutually_exclusive_group()
+    transport.add_argument("--remote", action="store_true", help="Verify local Codex through the managed SSH tunnel")
+    transport.add_argument("--https", action="store_true", help="Verify Codex through the configured public HTTPS origin")
     args = parser.parse_args()
     env = load_env()
+    if args.https:
+        if not gateway_url(env).startswith("https://"):
+            raise RuntimeError("Set an HTTPS GATEWAY_URL in .env")
+    else:
+        env["GATEWAY_URL"] = BASE_URL
     credentials(env)
     if args.remote:
         from server import Server
@@ -44,7 +51,8 @@ def main():
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "passed": False,
         "model": env.get("CODEX_MODEL") or "gpt-6.1-sol",
-        "scope": "Installed Codex CLI, isolated config, local read/write/check through " + ("remote gateway over SSH" if args.remote else "local HTTP Responses gateway"),
+        "scope": "Installed Codex CLI, isolated config, local read/write/check through " + ("public HTTPS gateway" if args.https else "remote gateway over SSH" if args.remote else "local HTTP Responses gateway"),
+        "gateway_origin": gateway_url(env),
         "fixture": str(fixture.relative_to(ROOT)),
     }
     try:
@@ -82,7 +90,7 @@ def main():
         report["failure"] = "Codex did not complete within 240 seconds"
     finally:
         report["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        save_json(ROOT / "outputs" / ("server-codex-verification.json" if args.remote else "codex-verification.json"), report)
+        save_json(ROOT / "outputs" / ("https-codex-verification.json" if args.https else "server-codex-verification.json" if args.remote else "codex-verification.json"), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
 

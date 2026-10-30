@@ -1,15 +1,15 @@
-# OpenAI 本地转发网关
+# OpenAI 转发网关
 
 使用 Caddy 透明转发 OpenAI API，为本地 Codex CLI 提供独立入口。上游固定为 `https://api.openai.com`，使用项目 `.env` 中的 `OPENAI_API_KEY`，费用计入该 Key 所属的 OpenAI Platform 项目。
 
 ```text
 Codex CLI（独立配置、网关凭证）
-    → http://127.0.0.1:8787/v1
+    → https://explainrepo.com/v1（或本地 / SSH 隧道入口）
     → Caddy 容器（替换上游鉴权）
     → https://api.openai.com/v1
 ```
 
-支持本机运行，也支持在服务器运行网关、由本地通过 **SSH 加密隧道**访问。桌面 App 配置不会被自动修改；客户端默认使用 HTTP/SSE，WebSocket 需另外验证。
+支持本机运行，也支持服务器部署后通过 **HTTPS 域名**或 **SSH 加密隧道**访问。桌面 App 配置不会被自动修改；客户端默认使用 HTTP/SSE，WebSocket 需另外验证。
 
 ## 运行条件
 
@@ -64,7 +64,7 @@ python3 /Users/yuyuehui/openai-platform/scripts/gateway.py codex -- -C /你的�
 
 - 使用本项目的 `.local/codex/`，不修改已有的 `~/.codex/config.toml` 或登录状态。
 - 将本项目的网关凭证提供给 Codex；移除子进程环境中的 `OPENAI_*` 上游配置。
-- 明确设置本地地址的 `NO_PROXY`，避免 macOS 系统代理导致本地连接返回 502。
+- 将回环地址和配置的网关域名加入 `NO_PROXY`，避免客户端系统代理干扰连接；系统级 TUN 仍由本机代理规则控制。
 - 使用 `wire_api = "responses"`，本次验证走 HTTP/SSE，关闭 WebSocket。
 - 从本机官方 Codex 模型缓存中复制所选模型的元数据（如果存在），仅复制模型信息，不复制账户身份或登录凭证。当前 CLI 对 `gpt-6.1-sol` 没有内置元数据，这一步避免回退为通用工具设置。
 
@@ -102,10 +102,10 @@ python3 scripts/verify_codex.py
 ## 存储和转发边界
 
 - 无数据库、无会话存储、无缓存服务；请求内容仅在内存中转发。
-- 未开启访问日志，Caddy 运行日志丢弃，Docker 日志驱动为 `none`。
-- 关闭 Caddy 管理端口及配置自动保存，根文件系统只读，运行目录使用内存文件系统。
+- 网关容器未开启访问日志，容器内 Caddy 运行日志丢弃，Docker 日志驱动为 `none`。
+- 网关容器关闭 Caddy 管理端口及配置自动保存，根文件系统只读，运行目录使用内存文件系统。
 - `.env` 中保存上游 Key 和网关凭证；容器运行环境也需要持有它们。Docker 管理权限等同于能够访问这些凭证。
-- 端口只绑定 `127.0.0.1`，局域网和公网不能直接连接。
+- 网关容器端口只绑定 `127.0.0.1`，公网通过服务器的 HTTPS 入口访问。
 - `/v1/*` 在鉴权后按原方法、路径、查询和内容转发；网关凭证替换成上游 Key。Cookie 与 ChatGPT 账号头不会转发。
 - 网关不重写模型、工具、`store` 或计费参数。测试使用 `store: false`，但 OpenAI 的数据保留政策仍独立适用。
 - 不实施每模型配额和花费上限；只授权可信客户端使用网关凭证。
@@ -121,6 +121,8 @@ python3 scripts/server.py deploy
 python3 scripts/server.py tunnel
 python3 scripts/gateway.py codex
 ```
+
+使用隧道时，将 `.env` 的 `GATEWAY_URL` 留空或设为 `http://127.0.0.1:8787`；配置了 HTTPS 地址时，Codex 启动器会优先使用该地址。
 
 部署脚本在服务器首次克隆仓库，后续执行 `git pull --ff-only`。它拒绝覆盖已有脏工作区或来源不匹配的仓库，并核对远端版本与本地提交一致。运行目录由 SSH 用户拥有，不修改服务器已有的 Web 服务。
 
@@ -160,7 +162,34 @@ python3 scripts/server.py untunnel  # 仅关闭本地 SSH 隧道
 python3 scripts/server.py down      # 停止服务器上的网关
 ```
 
-需要直接公网 HTTPS 时，应另行配置域名和证书。不要将此 HTTP 端口直接改成公网监听。
+## HTTPS 域名访问
+
+当前域名入口为 `https://explainrepo.com/v1`。Vercel 管理 DNS，根域名的 A 记录指向服务器；API 请求经过服务器原有的系统 Caddy，由它签发、续期证书并转发到回环地址上的网关容器。
+
+```text
+Codex / OpenAI SDK → HTTPS :443 → 系统 Caddy
+                 → 127.0.0.1:8787 → 网关容器 → OpenAI API
+```
+
+本地 `.env` 配置网关源站地址，不带 `/v1`：
+
+```dotenv
+GATEWAY_URL=https://explainrepo.com
+```
+
+随后直接运行 `python3 scripts/gateway.py codex`，无需开启 SSH 隧道。其他兼容客户端的 `base_url` 设为 `https://explainrepo.com/v1`，`api_key` 使用本地 `.env` 中的 `GATEWAY_TOKEN`。上游 `OPENAI_API_KEY` 仅供服务器网关使用。
+
+HTTPS 配置适用于已有 `/etc/caddy/Caddyfile`、`caddy` 系统用户与 systemd 服务的 Linux 服务器。DNS 指向该服务器，80/443 可达，SSH 用户能够用 `.env` 中的密码执行 sudo 时，可运行：
+
+```bash
+python3 scripts/server.py https --domain explainrepo.com
+python3 scripts/verify.py --https
+python3 scripts/verify_codex.py --https
+```
+
+配置脚本只添加自己的域名块，先验证，再备份和 reload，保留原有站点；重载失败时恢复原文件。它不会创建 DNS 记录。系统 Caddy 保留证书和站点配置供自动续期，域名访问日志被丢弃，网关容器继续使用前述无会话存储配置。
+
+HTTPS 检查额外验证可信证书、HTTP 到 HTTPS 重定向和远端容器状态；API 请求直接使用域名，SSH 仅用于检查服务器状态。结果写入 `outputs/https-verification.json` 和 `outputs/https-codex-verification.json`。重新验证会产生少量真实 API 用量。
 
 ## 参考
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy the committed gateway and manage a loopback-only OpenSSH tunnel."""
+"""Deploy the committed gateway; manage its SSH tunnel and system Caddy HTTPS host."""
 from __future__ import annotations
 
 import argparse
@@ -115,13 +115,35 @@ class Server:
                 raise RuntimeError(self.safe(result.stderr))
         return {"tunnel": "stopped", "remote_service": "unchanged"}
 
+    def https(self, domain):
+        if not domain or not re.fullmatch(r"[a-z0-9.-]+", domain):
+            raise RuntimeError("Specify a domain with --domain")
+        code = (ROOT / "scripts" / "configure_https.py").read_text()
+        command = "sudo -S -p '' python3 -c " + shlex.quote(code) + " " + shlex.quote(domain)
+        result = subprocess.run(
+            [*self.options, "-S", str(self.control), self.target, command],
+            input=self.config["PASSWORD"] + "\n", env=self.environment,
+            capture_output=True, text=True, timeout=180,
+        )
+        try:
+            message = json.loads(result.stdout)
+        except ValueError:
+            raise RuntimeError(self.safe(result.stderr or "HTTPS configuration returned no JSON")) from None
+        if result.returncode or not message.get("ok"):
+            raise RuntimeError(self.safe(message.get("error", "HTTPS configuration failed")))
+        save_json(ROOT / "outputs" / "https-deployment.json", message["result"])
+        return message["result"]
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["deploy", "status", "tunnel", "untunnel", "down"])
+    parser.add_argument("command", choices=["deploy", "status", "tunnel", "untunnel", "down", "https"])
+    parser.add_argument("--domain", help="Domain for the existing system Caddy service")
     args = parser.parse_args()
     server = Server()
-    if args.command in ("tunnel", "untunnel"):
+    if args.command == "https":
+        result = server.https(args.domain)
+    elif args.command in ("tunnel", "untunnel"):
         result = getattr(server, args.command)()
     else:
         print("Connecting to server...", flush=True)

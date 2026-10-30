@@ -9,9 +9,20 @@ import shlex
 import subprocess
 import urllib.error
 import urllib.request
+import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = "http://127.0.0.1:8787"
+
+
+def gateway_url(env: dict[str, str]) -> str:
+    value = (env.get("GATEWAY_URL") or BASE_URL).rstrip("/")
+    parsed = urllib.parse.urlsplit(value)
+    if not parsed.hostname or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+        raise RuntimeError("GATEWAY_URL must contain only scheme, host and optional port")
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")):
+        raise RuntimeError("Public gateway connections require HTTPS")
+    return value
 
 
 def load_env() -> dict[str, str]:
@@ -70,7 +81,7 @@ def compose(env: dict[str, str], *args: str, timeout: int = 120) -> subprocess.C
 
 
 def opener():
-    # Local tests must actually hit the local gateway, independent of HTTP_PROXY.
+    # Connect to the configured gateway directly, independent of HTTP_PROXY.
     # Do not follow redirects with a bearer credential.
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
@@ -78,7 +89,7 @@ def opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
 
-def request(env: dict[str, str], path: str, payload=None, token=True, timeout=180):
+def request(env: dict[str, str], path: str, payload=None, token=True, timeout=180, origin=None):
     headers = {"Accept-Encoding": "identity"}
     if token is not False:
         headers["Authorization"] = "Bearer " + (env["GATEWAY_TOKEN"] if token is True else token)
@@ -86,7 +97,7 @@ def request(env: dict[str, str], path: str, payload=None, token=True, timeout=18
     if payload is not None:
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(BASE_URL + path, data=data, headers=headers)
+    req = urllib.request.Request((origin or gateway_url(env)) + path, data=data, headers=headers)
     try:
         return opener().open(req, timeout=timeout)
     except urllib.error.HTTPError as response:
@@ -122,7 +133,7 @@ cli_auth_credentials_store = "file"
 
 [model_providers.local_gateway]
 name = "Local OpenAI Gateway"
-base_url = "{BASE_URL}/v1"
+base_url = {json.dumps(gateway_url(env) + "/v1")}
 env_key = "CODEX_GATEWAY_TOKEN"
 wire_api = "responses"
 requires_openai_auth = false
@@ -145,9 +156,10 @@ def codex_env(env: dict[str, str], home: Path) -> dict[str, str]:
             result.pop(name)
     result["CODEX_HOME"] = str(home)
     result["CODEX_GATEWAY_TOKEN"] = env["GATEWAY_TOKEN"]
-    # Rust HTTP clients can pick up macOS system proxies. Explicitly bypass loopback.
+    # Rust HTTP clients can pick up macOS system proxies. Bypass gateway hosts.
     bypass = result.get("NO_PROXY") or result.get("no_proxy") or ""
-    bypass = ",".join(part for part in [bypass, "127.0.0.1", "localhost", "::1"] if part)
+    gateway_host = urllib.parse.urlsplit(gateway_url(env)).hostname
+    bypass = ",".join(part for part in [bypass, "127.0.0.1", "localhost", "::1", gateway_host] if part)
     result["NO_PROXY"] = bypass
     result["no_proxy"] = bypass
     return result

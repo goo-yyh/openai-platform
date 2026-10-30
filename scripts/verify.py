@@ -7,10 +7,15 @@ import collections
 import datetime
 import json
 import secrets
+import socket
+import ssl
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
-from common import ROOT, compose, credentials, load_env, redact, request, save_json
+from common import BASE_URL, ROOT, compose, credentials, gateway_url, load_env, opener, redact, request, save_json
 
 
 def check(condition, message):
@@ -73,19 +78,26 @@ def output_text(response):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--remote", action="store_true", help="Verify the server gateway through the managed SSH tunnel")
+    transport = parser.add_mutually_exclusive_group()
+    transport.add_argument("--remote", action="store_true", help="Verify the server gateway through the managed SSH tunnel")
+    transport.add_argument("--https", action="store_true", help="Verify the public HTTPS origin configured by GATEWAY_URL")
     args = parser.parse_args()
     env = load_env()
+    if args.https:
+        check(gateway_url(env).startswith("https://"), "Set an HTTPS GATEWAY_URL in .env")
+    else:
+        env["GATEWAY_URL"] = BASE_URL
     credentials(env)
     model = env.get("CODEX_MODEL") or "gpt-6.1-sol"
     report = {
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "scope": ("Remote gateway via SSH tunnel" if args.remote else "Local gateway") + "; HTTP/SSE, live OpenAI API. WebSocket transport not tested.",
+        "scope": ("Public HTTPS gateway" if args.https else "Remote gateway via SSH tunnel" if args.remote else "Local gateway") + "; SSE, live OpenAI API. WebSocket transport not tested.",
+        "gateway_origin": gateway_url(env),
         "requested_model": model,
         "checks": [],
         "passed": False,
     }
-    target = ROOT / "outputs" / ("server-verification.json" if args.remote else "verification.json")
+    target = ROOT / "outputs" / ("https-verification.json" if args.https else "server-verification.json" if args.remote else "verification.json")
 
     def record(name, **details):
         report["checks"].append({"name": name, "passed": True, **details})
@@ -94,15 +106,32 @@ def main():
 
     try:
         remote = None
-        if args.remote:
+        if args.remote or args.https:
             from server import Server
             server = Server(env)
-            check(server.tunnel_running(), "Open the managed SSH tunnel first")
+            if args.remote:
+                check(server.tunnel_running(), "Open the managed SSH tunnel first")
             remote = server.call("status", timeout=60)
             check(remote["health"] == "healthy", "Remote gateway is not healthy")
             check(remote["ports"] == {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8787"}]}, "Remote gateway has unexpected port bindings")
             check(remote["log_driver"] == "none" and remote["read_only"], "Remote runtime settings differ from the validated configuration")
-            record("remote_runtime_and_tunnel", **remote)
+            record("remote_runtime_and_tunnel" if args.remote else "remote_runtime", **remote)
+        if args.https:
+            host = urllib.parse.urlsplit(gateway_url(env)).hostname
+            port = urllib.parse.urlsplit(gateway_url(env)).port or 443
+            with socket.create_connection((host, port), timeout=20) as raw:
+                with ssl.create_default_context().wrap_socket(raw, server_hostname=host) as tls:
+                    cert = tls.getpeercert()
+                    record("trusted_tls_certificate", tls_version=tls.version(), subject_alt_names=cert.get("subjectAltName"), issuer=cert.get("issuer"), expires=cert.get("notAfter"))
+            # Probe HTTP without a credential; never send the gateway token in plaintext.
+            try:
+                redirect = opener().open("http://" + host + "/healthz", timeout=20)
+            except urllib.error.HTTPError as response:
+                redirect = response
+            with redirect:
+                check(redirect.status in (301, 308), "HTTP is not redirected to HTTPS")
+                check(redirect.headers.get("Location") == gateway_url(env) + "/healthz", "Unexpected HTTPS redirect destination")
+                record("http_redirects_to_https", http_status=redirect.status)
         for name, path, token, expected in (
             ("health", "/healthz", False, 200),
             ("missing_token_rejected", "/v1/models", False, 401),
