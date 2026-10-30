@@ -39,7 +39,7 @@ def load_env() -> dict[str, str]:
 
 
 def redact(text: str, env: dict[str, str]) -> str:
-    for name in ("OPENAI_API_KEY", "GATEWAY_TOKEN"):
+    for name in ("OPENAI_API_KEY", "GATEWAY_TOKEN", "PASSWORD", "SSH_PASSWORD"):
         if env.get(name):
             text = text.replace(env[name], "[REDACTED]")
     return re.sub(r"\bsk-[A-Za-z0-9_-]{16,}", "[REDACTED]", text)
@@ -132,7 +132,7 @@ stream_max_retries = 0
 stream_idle_timeout_ms = 180000
 
 [shell_environment_policy]
-exclude = ["OPENAI_API_KEY", "GATEWAY_TOKEN", "CODEX_GATEWAY_TOKEN"]
+exclude = ["OPENAI_API_KEY", "GATEWAY_TOKEN", "CODEX_GATEWAY_TOKEN", "PASSWORD", "SSH_PASSWORD", "DEPLOY_SSH_PASSWORD"]
 '''
     (home / "config.toml").write_text(content)
     return home
@@ -141,7 +141,7 @@ exclude = ["OPENAI_API_KEY", "GATEWAY_TOKEN", "CODEX_GATEWAY_TOKEN"]
 def codex_env(env: dict[str, str], home: Path) -> dict[str, str]:
     result = dict(os.environ)
     for name in list(result):
-        if name.startswith(("OPENAI_", "CODEX_")) or name == "GATEWAY_TOKEN":
+        if name.startswith(("OPENAI_", "CODEX_", "DEPLOY_SSH_")) or name in ("GATEWAY_TOKEN", "PASSWORD", "SSH_PASSWORD"):
             result.pop(name)
     result["CODEX_HOME"] = str(home)
     result["CODEX_GATEWAY_TOKEN"] = env["GATEWAY_TOKEN"]

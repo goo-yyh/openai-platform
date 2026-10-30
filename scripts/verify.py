@@ -2,6 +2,7 @@
 """Live gateway checks; 3 short Responses calls, no user files sent upstream."""
 from __future__ import annotations
 
+import argparse
 import collections
 import datetime
 import json
@@ -71,17 +72,20 @@ def output_text(response):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--remote", action="store_true", help="Verify the server gateway through the managed SSH tunnel")
+    args = parser.parse_args()
     env = load_env()
     credentials(env)
     model = env.get("CODEX_MODEL") or "gpt-6.1-sol"
     report = {
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "scope": "Local HTTP/SSE gateway; live OpenAI API. WebSocket transport not tested.",
+        "scope": ("Remote gateway via SSH tunnel" if args.remote else "Local gateway") + "; HTTP/SSE, live OpenAI API. WebSocket transport not tested.",
         "requested_model": model,
         "checks": [],
         "passed": False,
     }
-    target = ROOT / "outputs" / "verification.json"
+    target = ROOT / "outputs" / ("server-verification.json" if args.remote else "verification.json")
 
     def record(name, **details):
         report["checks"].append({"name": name, "passed": True, **details})
@@ -89,6 +93,16 @@ def main():
         save_json(target, report)
 
     try:
+        remote = None
+        if args.remote:
+            from server import Server
+            server = Server(env)
+            check(server.tunnel_running(), "Open the managed SSH tunnel first")
+            remote = server.call("status", timeout=60)
+            check(remote["health"] == "healthy", "Remote gateway is not healthy")
+            check(remote["ports"] == {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8787"}]}, "Remote gateway has unexpected port bindings")
+            check(remote["log_driver"] == "none" and remote["read_only"], "Remote runtime settings differ from the validated configuration")
+            record("remote_runtime_and_tunnel", **remote)
         for name, path, token, expected in (
             ("health", "/healthz", False, 200),
             ("missing_token_rejected", "/v1/models", False, 401),
@@ -140,11 +154,14 @@ def main():
         record("stateless_followup", **evidence)
 
         # Only return booleans/paths; never inspect or print container environment.
-        runtime = compose(env, "exec", "-T", "gateway", "sh", "-c", "test ! -e /config/caddy/autosave.json && test ! -e /data/caddy/autosave.json && echo no-autosaved-config")
-        check("no-autosaved-config" in runtime.stdout, "Caddy configuration was persisted")
+        if remote is not None:
+            check(not remote["autosaved_config"], "Remote Caddy configuration was persisted")
+        else:
+            runtime = compose(env, "exec", "-T", "gateway", "sh", "-c", "test ! -e /config/caddy/autosave.json && test ! -e /data/caddy/autosave.json && echo no-autosaved-config")
+            check("no-autosaved-config" in runtime.stdout, "Caddy configuration was persisted")
         record("no_autosaved_config")
         report["passed"] = True
-        print("All gateway checks passed. Evidence: outputs/verification.json", flush=True)
+        print("All gateway checks passed. Evidence: " + str(target.relative_to(ROOT)), flush=True)
     except Exception as exc:
         report["failure"] = redact(str(exc), env)
         print("FAIL " + report["failure"], file=sys.stderr)

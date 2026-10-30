@@ -9,7 +9,7 @@ Codex CLI（独立配置、网关凭证）
     → https://api.openai.com/v1
 ```
 
-当前交付范围是**本机 HTTP/SSE 模式**，已验证真实 OpenAI Responses 请求和 Codex CLI 文件操作。桌面 App 配置没有修改；远程服务器、公开 HTTPS 和 WebSocket 模式没有纳入本次验收。
+支持本机运行，也支持在服务器运行网关、由本地通过 **SSH 加密隧道**访问。桌面 App 配置不会被自动修改；客户端默认使用 HTTP/SSE，WebSocket 需另外验证。
 
 ## 运行条件
 
@@ -110,9 +110,57 @@ python3 scripts/verify_codex.py
 - 网关不重写模型、工具、`store` 或计费参数。测试使用 `store: false`，但 OpenAI 的数据保留政策仍独立适用。
 - 不实施每模型配额和花费上限；只授权可信客户端使用网关凭证。
 
-## 之后部署到服务器
+## 服务器部署与 SSH 隧道
 
-当前 Compose 有意只开放本机 HTTP 端口。正式远程部署应配置域名和 HTTPS、维护证书存储，并从你的本地 Codex 再验证一遍。不要直接把 `127.0.0.1:8787` 改成公网绑定后通过明文 HTTP 使用。
+在本地 `.env` 中配置 `IP`、`NAME` 和 `PASSWORD`。可选 `SSH_PORT` 默认为 `22`，`SERVER_PATH` 默认为服务器用户目录下的 `services/openai-platform`。密码含空格或 `#` 时请用单引号包住值。服务器需已安装 Docker、Compose、Git、Python 3.10+，且该 SSH 用户可操作 Docker、访问本仓库和 OpenAI API。
+
+先将本地代码提交并推送到本仓库的 `main`，然后运行：
+
+```bash
+python3 scripts/server.py deploy
+python3 scripts/server.py tunnel
+python3 scripts/gateway.py codex
+```
+
+部署脚本在服务器首次克隆仓库，后续执行 `git pull --ff-only`。它拒绝覆盖已有脏工作区或来源不匹配的仓库，并核对远端版本与本地提交一致。运行目录由 SSH 用户拥有，不修改服务器已有的 Web 服务。
+
+只有 `OPENAI_API_KEY`、`GATEWAY_TOKEN` 和 `CODEX_MODEL` 会通过 SSH 传到远端 `.env`，文件权限为 `0600`。服务器的 IP、SSH 用户名和密码不写入远端 `.env`。SSH 密码只提供给本地 OpenSSH 的 askpass 子进程，不放在命令行参数或脚本正文中。
+
+主机密钥保存在本项目 `.local/ssh/known_hosts`；首次使用采用 OpenSSH 的首次信任方式，后续主机密钥变化会拒绝连接，不会自动清除旧记录。
+
+```text
+本地 Codex → 本地 127.0.0.1:8787
+          → SSH 加密隧道
+          → 服务器 127.0.0.1:8787 → Caddy → OpenAI API
+```
+
+本地和服务器的 8787 都只绑定回环地址。无需域名或公开 HTTP 端口；公网只使用服务器已有的 SSH 入口。隧道在后台运行，网络中断后可重新执行 `tunnel`。它不会自动安装开机启动项，服务器容器则使用 `unless-stopped` 重启策略。
+
+本地 Docker 网关和 SSH 隧道共用 8787 端口，切换到服务器前先停止本地网关：
+
+```bash
+python3 scripts/gateway.py down
+python3 scripts/server.py tunnel
+```
+
+查看服务器、验证完整链路：
+
+```bash
+python3 scripts/server.py status
+python3 scripts/verify.py --remote
+python3 scripts/verify_codex.py --remote
+```
+
+远端验证报告分别写入 `outputs/server-verification.json` 和 `outputs/server-codex-verification.json`，不覆盖本地验收结果。
+
+关闭隧道与停止远端网关是两项独立操作：
+
+```bash
+python3 scripts/server.py untunnel  # 仅关闭本地 SSH 隧道
+python3 scripts/server.py down      # 停止服务器上的网关
+```
+
+需要直接公网 HTTPS 时，应另行配置域名和证书。不要将此 HTTP 端口直接改成公网监听。
 
 ## 参考
 

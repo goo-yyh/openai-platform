@@ -2,6 +2,7 @@
 """Run the installed Codex CLI through the gateway against a disposable fixture."""
 from __future__ import annotations
 
+import argparse
 import datetime
 import json
 import secrets
@@ -13,8 +14,16 @@ from common import ROOT, codex_config, codex_env, credentials, load_env, redact,
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--remote", action="store_true", help="Verify local Codex through the managed SSH tunnel")
+    args = parser.parse_args()
     env = load_env()
     credentials(env)
+    if args.remote:
+        from server import Server
+        server = Server(env)
+        if not server.tunnel_running() or server.call("status", timeout=60)["health"] != "healthy":
+            raise RuntimeError("Open the SSH tunnel to a healthy remote gateway first")
     binary = shutil.which("codex")
     if not binary:
         raise RuntimeError("Codex CLI not installed")
@@ -35,7 +44,7 @@ def main():
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "passed": False,
         "model": env.get("CODEX_MODEL") or "gpt-6.1-sol",
-        "scope": "Installed Codex CLI, isolated config, local read/write/check through HTTP Responses gateway",
+        "scope": "Installed Codex CLI, isolated config, local read/write/check through " + ("remote gateway over SSH" if args.remote else "local HTTP Responses gateway"),
         "fixture": str(fixture.relative_to(ROOT)),
     }
     try:
@@ -73,7 +82,7 @@ def main():
         report["failure"] = "Codex did not complete within 240 seconds"
     finally:
         report["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        save_json(ROOT / "outputs" / "codex-verification.json", report)
+        save_json(ROOT / "outputs" / ("server-codex-verification.json" if args.remote else "codex-verification.json"), report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
 
