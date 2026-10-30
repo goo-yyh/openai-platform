@@ -1,0 +1,31 @@
+name: openai-platform
+services:
+  gateway:
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8080"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Run scripts/gateway.py with a populated .env}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Run scripts/gateway.py init first}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    # The official binary carries cap_net_bind_service; keep it in the bounding set.
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /data:size=16m,mode=0700
+      - /config:size=1m,mode=0700
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: "none"

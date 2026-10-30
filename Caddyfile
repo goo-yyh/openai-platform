@@ -1,0 +1,46 @@
+{
+	admin off
+	persist_config off
+	auto_https off
+	# No request/access logs, debug dumps, or runtime request error logs.
+	log {
+		output discard
+	}
+}
+
+http://:8080 {
+	@health {
+		method GET
+		path /healthz
+	}
+	handle @health {
+		respond "ok" 200
+	}
+
+	handle /v1/* {
+		@unauthorized not header Authorization "Bearer {$GATEWAY_TOKEN}"
+		handle @unauthorized {
+			header Content-Type application/json
+			respond `{"error":{"type":"authentication_error","message":"Invalid gateway credential"}}` 401
+		}
+		handle {
+			# Preserve method, path, query, request body, SSE, and WebSocket frames.
+			# The upstream is fixed: this is not an open forward proxy.
+			reverse_proxy https://api.openai.com {
+				header_up Host api.openai.com
+				header_up Authorization "Bearer {env.OPENAI_API_KEY}"
+				header_up -Cookie
+				header_up -ChatGPT-Account-ID
+				transport http {
+					dial_timeout 10s
+					response_header_timeout 180s
+					compression off
+				}
+			}
+		}
+	}
+	handle {
+		header Content-Type application/json
+		respond `{"error":{"type":"not_found","message":"Not found"}}` 404
+	}
+}

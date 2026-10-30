@@ -1,0 +1,6 @@
+.env*
+.local
+work
+outputs
+.git
+__pycache__
